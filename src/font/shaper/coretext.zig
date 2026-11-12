@@ -769,6 +769,23 @@ pub const Shaper = struct {
         pub fn addCodepoint(self: RunIteratorHook, cp: u32, cluster: u32) !void {
             const state = &self.shaper.run_state;
 
+            // Font selection resolves modern Hangul through its composed
+            // syllable. Supply that same syllable to CoreText: fonts such as
+            // IBM Plex Sans KR cover syllables but not conjoining jamo, so
+            // raw NFD input can produce another font's glyph IDs. The renderer
+            // would then draw those IDs with the originally selected face.
+            // Only this shaping buffer changes; terminal text stays verbatim.
+            if (cp >= 0x1161 and cp <= 0x11C2 and state.codepoints.items.len > 0) {
+                const last = &state.codepoints.items[state.codepoints.items.len - 1];
+                if (last.cluster == cluster) {
+                    if (font.hangul.composedSyllable(@intCast(last.codepoint), &.{@intCast(cp)})) |composed| {
+                        last.codepoint = composed;
+                        state.unichars.items[state.unichars.items.len - 1] = @intCast(composed);
+                        return;
+                    }
+                }
+            }
+
             // Build our UTF-16 string for CoreText
             try state.unichars.ensureUnusedCapacity(self.shaper.alloc, 2);
 
