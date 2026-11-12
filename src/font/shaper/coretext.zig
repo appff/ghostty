@@ -1188,6 +1188,66 @@ test "run iterator: canonically equivalent NFC and NFD Hangul use the same font"
     try testing.expectEqual(indexes[1], indexes[0]);
 }
 
+test "shape canonically equivalent Hangul with a noncomposing font" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var testdata = try testShaperWithFont(alloc, .jetbrains_mono);
+    defer testdata.deinit();
+    var disco = font.Discover.init(testdata.lib);
+    defer disco.deinit();
+    testdata.grid.resolver.discover = &disco;
+
+    // Unlike Apple SD Gothic Neo, this macOS font does not shape modern
+    // jamo into its syllable glyphs. Font resolution alone is insufficient.
+    var map: font.CodepointMap = .{};
+    defer map.deinit(alloc);
+    try map.add(alloc, .{
+        .range = .{ 0xAC00, 0xD7A3 },
+        .descriptor = .{ .family = "AppleMyungjo" },
+    });
+    testdata.grid.resolver.codepoint_map = map;
+
+    const inputs = [_][]const u8{
+        "이력서",
+        "\u{110B}\u{1175}\u{1105}\u{1167}\u{11A8}\u{1109}\u{1165}",
+        // Mixed LV + T is also canonically equivalent.
+        "이려\u{11A8}서",
+    };
+    var expected: ?[]font.shape.Cell = null;
+    defer if (expected) |cells| alloc.free(cells);
+
+    for (inputs) |input| {
+        var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 20, .rows = 3 });
+        defer t.deinit(alloc);
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(input);
+
+        var state: terminal.RenderState = .empty;
+        defer state.deinit(alloc);
+        try state.update(alloc, &t);
+        var it = testdata.shaper.runIterator(.{
+            .grid = testdata.grid,
+            .cells = state.row_data.get(0).cells.slice(),
+        });
+        const run = (try it.next(alloc)).?;
+        const shaped = try testdata.shaper.shape(run);
+        try testing.expectEqual(@as(usize, 3), shaped.len);
+        if (expected) |cells| {
+            try testing.expectEqualDeep(cells, shaped);
+        } else {
+            expected = try alloc.dupe(font.shape.Cell, shaped);
+        }
+        try testing.expect(try it.next(alloc) == null);
+
+        // Shaping must not change copied text, filenames, or hyperlink data.
+        const copied = try t.screens.active.dumpStringAlloc(alloc, .{ .screen = .{} });
+        defer alloc.free(copied);
+        try testing.expectEqualStrings(input, std.mem.trimEnd(u8, copied, "\n"));
+    }
+}
+
 test "shape" {
     const testing = std.testing;
     const alloc = testing.allocator;
