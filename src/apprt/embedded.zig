@@ -4862,6 +4862,17 @@ pub const CAPI = struct {
         surface.textInputCallback(ptr[0..len]);
     }
 
+    /// cmux: accept input already encoded by another terminal emulator.
+    export fn ghostty_surface_encoded_input(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        surface.core_surface.encodedInputCallback(ptr[0..len]) catch |err| {
+            log.err("error in encoded input callback err={}", .{err});
+        };
+    }
+
     /// Set the preedit text for the surface. This is used for IME
     /// composition. If the length is 0, then the preedit text is cleared.
     export fn ghostty_surface_preedit(

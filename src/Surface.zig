@@ -5158,6 +5158,13 @@ pub fn textInputCallback(self: *Surface, text: []const u8) !void {
     try self.completeTextInput(text);
 }
 
+/// cmux: forward remote terminal input to this existing PTY byte-for-byte.
+/// The remote terminal has already encoded keys, mouse and bracketed paste.
+pub fn encodedInputCallback(self: *Surface, bytes: []const u8) !void {
+    if (bytes.len == 0 or self.child_exited) return;
+    self.queueIo(try termio.Message.writeReq(self.alloc, bytes), .unlocked);
+}
+
 /// Callback for when the surface is fully visible or not, regardless
 /// of focus state. This is used to pause rendering when the surface
 /// is not visible, and also re-render when it becomes visible again.

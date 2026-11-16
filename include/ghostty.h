@@ -1583,6 +1583,8 @@ GHOSTTY_API void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t)
 // cmux fork: delete when upstream separates committed typed text from paste
 // delivery for libghostty embedders.
 GHOSTTY_API void ghostty_surface_text_input(ghostty_surface_t, const char*, uintptr_t);
+// Already encoded remote user input. No paste wrapping or newline conversion.
+GHOSTTY_API void ghostty_surface_encoded_input(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
 // cmux fork: upstream already has internal Termio.processOutput. Delete this
 // C bridge when upstream exports an equivalent surface output API.
