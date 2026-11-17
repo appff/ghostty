@@ -408,6 +408,17 @@ typedef struct {
   bool sentinel;
 } ghostty_string_s;
 
+// Desktop peer bootstrap. Free state with ghostty_string_free and history with
+// ghostty_peer_history_free. History is immutable and outlives the source surface.
+typedef struct {
+  ghostty_string_s state;
+  void* history;
+  uint64_t next_sequence;
+  uint64_t history_revision;
+  uint16_t columns;
+  uint16_t rows;
+} ghostty_peer_snapshot_s;
+
 typedef struct {
   double tl_px_x;
   double tl_px_y;
@@ -1363,6 +1374,15 @@ GHOSTTY_API ghostty_surface_t ghostty_surface_new_with_scrollback_limit(
 // eventually call ghostty_surface_free. Safe to call repeatedly before free.
 GHOSTTY_API void ghostty_surface_request_process_termination(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_free(ghostty_surface_t);
+GHOSTTY_API bool ghostty_surface_peer_snapshot(ghostty_surface_t, ghostty_peer_snapshot_s*);
+GHOSTTY_API bool ghostty_surface_peer_output(ghostty_surface_t, uint64_t, uint16_t, uint16_t, ghostty_string_s*);
+GHOSTTY_API void ghostty_surface_peer_output_release(ghostty_surface_t);
+GHOSTTY_API void ghostty_peer_history_free(void*);
+GHOSTTY_API bool ghostty_peer_history_read(void*, uintptr_t, ghostty_string_s*, uint16_t*);
+// Manual-mirror-only mutations; serialize them with manual output/teardown.
+GHOSTTY_API bool ghostty_surface_peer_restore(ghostty_surface_t, const uint8_t*, uintptr_t);
+GHOSTTY_API uint64_t ghostty_surface_peer_history_revision(ghostty_surface_t);
+GHOSTTY_API bool ghostty_surface_peer_history_prepend(ghostty_surface_t, const uint8_t*, uintptr_t, uint16_t, uint16_t, uint64_t*);
 GHOSTTY_API void* ghostty_surface_userdata(ghostty_surface_t);
 GHOSTTY_API ghostty_app_t ghostty_surface_app(ghostty_surface_t);
 // Returns the embedder limit passed at construction, or zero when inherited.

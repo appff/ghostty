@@ -1233,6 +1233,47 @@ pub fn clone(
     return result;
 }
 
+/// Prepend older peer history without modifying active rows, cursor/selection
+/// pins or the user's reading position. Newest history batches arrive first.
+/// Returns false without mutation when the existing scrollback budget is full.
+pub fn prependClonedRows(self: *PageList, source: *const PageList, rows: usize) !bool {
+    if (self.cols != source.cols or rows == 0 or rows > source.total_rows)
+        return error.InvalidHistory;
+    var staged: List = .{};
+    defer while (staged.popFirst()) |node| self.destroyNode(node);
+    var it = source.pageIterator(.right_down, .{ .screen = .{} }, .{
+        .screen = .{ .y = @intCast(rows - 1) },
+    });
+    var added: usize = 0;
+    while (it.next()) |chunk| {
+        const capacity = chunk.node.capacity();
+        const allocation = @max(std_size, Page.layout(capacity).total_size);
+        if (self.page_size + allocation > self.maxSize()) return false;
+        const node = try self.createPage(.{ .cap = capacity });
+        staged.append(node);
+        const page = node.page();
+        page.size.rows = chunk.end - chunk.start;
+        page.size.cols = chunk.node.cols();
+        try page.cloneFrom(chunk.node.page(), chunk.start, chunk.end);
+        added += node.rows();
+    }
+    if (added != rows) return error.InvalidHistory;
+    // `.top` is a viewport position, not a request to jump when older history
+    // arrives. Pin the same row before adding anything above it.
+    if (self.viewport == .top) {
+        self.viewport_pin.* = .{ .node = self.pages.first.? };
+        self.viewport = .pin;
+        self.viewport_pin_row_offset = 0;
+    }
+    while (staged.pop()) |node| self.pages.prepend(node);
+    self.total_rows += added;
+    if (self.viewport_pin_row_offset) |*offset| offset.* += added;
+    self.row_space_revision +%= 1;
+    self.page_compression.markActivity();
+    self.assertIntegrity();
+    return true;
+}
+
 /// Resize options
 pub const Resize = struct {
     /// The new cols/cells of the screen.

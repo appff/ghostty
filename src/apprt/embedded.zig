@@ -19,6 +19,13 @@ const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const terminal_style = @import("../terminal/style.zig");
+const PeerTerminalSnapshot = @import("PeerTerminalSnapshot.zig");
+const PeerTerminalHistory = @import("PeerTerminalHistory.zig");
+
+test {
+    _ = PeerTerminalSnapshot;
+    _ = PeerTerminalHistory;
+}
 const termio = @import("../termio.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
@@ -2969,6 +2976,165 @@ pub const CAPI = struct {
         const core_sel = terminal.Selection.init(top_left, bottom_right, false);
 
         return readClipboardTextLocked(surface, core_sel, max_bytes, result);
+    }
+
+    const PeerSnapshot = extern struct {
+        state: String,
+        history: ?*PeerTerminalHistory,
+        next_sequence: u64,
+        history_revision: u64,
+        columns: u16,
+        rows: u16,
+    };
+
+    /// Atomically starts retention and captures both terminal screens plus the
+    /// raw-output boundary. A partial parser token must finish before capture.
+    export fn ghostty_surface_peer_snapshot(surface: *Surface, result: *PeerSnapshot) bool {
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        const io = &core.io;
+        if (io.processing_output or io.terminal_stream.parser.state != .ground or
+            io.terminal_stream.utf8decoder.state != 0 or
+            !io.terminal_stream.handler.apc.isInactive()) return false;
+        if (io.peer_output_replay == null) {
+            io.peer_output_replay = @import("../termio/OutputReplay.zig").init(
+                io.alloc,
+                4 * 1024 * 1024,
+                io.processed_output_bytes,
+            ) catch return false;
+        }
+        const state = PeerTerminalSnapshot.encode(global.alloc(), &io.terminal) catch return false;
+        const history = PeerTerminalHistory.capture(global.alloc(), &io.terminal, 20_000) catch {
+            global.alloc().free(state);
+            return false;
+        };
+        result.* = .{
+            .state = String.fromSlice(state),
+            .history = history,
+            .next_sequence = io.processed_output_bytes,
+            .history_revision = io.terminal.screens.get(.primary).?.pages.row_space_revision,
+            .columns = io.terminal.cols,
+            .rows = io.terminal.rows,
+        };
+        return true;
+    }
+
+    /// Returns up to 32 KiB of unchanged, already-parsed PTY output. False
+    /// means the cursor/geometry cannot continue and requires a new snapshot.
+    export fn ghostty_surface_peer_output(
+        surface: *Surface,
+        from: u64,
+        columns: u16,
+        rows: u16,
+        result: *String,
+    ) bool {
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        if (core.io.terminal.cols != columns or core.io.terminal.rows != rows) return false;
+        const replay = &(core.io.peer_output_replay orelse return false);
+        var buffer: [32 * 1024]u8 = undefined;
+        const bytes = replay.read(from, &buffer) orelse return false;
+        if (bytes.len == 0) {
+            result.* = .empty;
+        } else {
+            result.* = String.fromSlice(global.alloc().dupe(u8, bytes) catch return false);
+        }
+        return true;
+    }
+
+    /// Releases retention after the authenticated peer service's grace period.
+    export fn ghostty_surface_peer_output_release(surface: *Surface) void {
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        if (core.io.peer_output_replay) |*replay| replay.deinit(core.io.alloc);
+        core.io.peer_output_replay = null;
+    }
+
+    export fn ghostty_peer_history_free(history: ?*PeerTerminalHistory) void {
+        if (history) |value| value.destroy(global.alloc());
+    }
+
+    /// The owner serializes read/free; the history handle is independent of its
+    /// original surface lifetime. Offsets count rows already received from newest.
+    export fn ghostty_peer_history_read(
+        history: *PeerTerminalHistory,
+        offset: usize,
+        result: *String,
+        rows: *u16,
+    ) bool {
+        var buffer: [64 * 1024]u8 = undefined;
+        const batch = history.read(offset, &buffer) catch return false;
+        rows.* = @intCast(batch.rows);
+        result.* = if (batch.bytes.len == 0) .empty else String.fromSlice(global.alloc().dupe(u8, batch.bytes) catch return false);
+        return true;
+    }
+
+    /// Only a shell-less manual mirror can accept authoritative peer state.
+    /// The embedder fences earlier output and serializes this with later bytes.
+    export fn ghostty_surface_peer_restore(surface: *Surface, bytes: [*]const u8, length: usize) bool {
+        if (surface.io_mode != .manual_mirror) return false;
+        var parsed = PeerTerminalSnapshot.decode(global.alloc(), bytes[0..length]) catch return false;
+        defer parsed.deinit();
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        const io = &core.io;
+        // An interrupted old stream may end inside UTF-8/OSC/APC. None of its
+        // parser prefix can be carried across an authoritative reset.
+        io.terminal_stream.parser.deinit();
+        io.terminal_stream.parser = .init();
+        io.terminal_stream.parser.osc_parser.alloc = io.alloc;
+        io.terminal_stream.utf8decoder = .{};
+        io.terminal_stream.handler.apc.deinit();
+        io.terminal_stream.handler.apc = .{};
+        parsed.value.restore(&io.terminal) catch return false;
+        io.terminal_stream.handler.suppress_peer_side_effects = true;
+        io.renderer_wakeup.notify() catch {};
+        return true;
+    }
+
+    export fn ghostty_surface_peer_history_revision(surface: *Surface) u64 {
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        return core.io.terminal.screens.get(.primary).?.pages.row_space_revision;
+    }
+
+    export fn ghostty_surface_peer_history_prepend(
+        surface: *Surface,
+        bytes: [*]const u8,
+        length: usize,
+        columns: u16,
+        rows: u16,
+        revision: *u64,
+    ) bool {
+        if (surface.io_mode != .manual_mirror or rows == 0 or rows > 128 or
+            columns < 2 or columns > 1000 or length > 64 * 1024) return false;
+        var history = terminal.Terminal.init(global.io(), global.alloc(), .{
+            .cols = columns,
+            .rows = rows,
+            .max_scrollback = 0,
+        }) catch return false;
+        defer history.deinit(global.alloc());
+        var stream = history.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(bytes[0..length]);
+        if (stream.handler.semantic_failure or stream.parser.state != .ground or
+            stream.utf8decoder.state != 0) return false;
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        if (core.io.terminal.cols != columns) return false;
+        const primary = core.io.terminal.screens.get(.primary).?;
+        if (primary.pages.row_space_revision != revision.*) return false;
+        if (!(primary.pages.prependClonedRows(&history.screens.get(.primary).?.pages, rows) catch return false)) return false;
+        revision.* = primary.pages.row_space_revision;
+        core.io.terminal.flags.dirty.clear = true;
+        core.io.renderer_wakeup.notify() catch {};
+        return true;
     }
 
     /// cmux fork: read a byte-bounded VT reconstruction of the most recent

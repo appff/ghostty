@@ -58,6 +58,31 @@ fn discardSurfaceMessage(msg: apprt.surface.Message) void {
     }
 }
 
+fn suppressPeerSurfaceEffect(enabled: bool, msg: apprt.surface.Message) bool {
+    if (!enabled) return false;
+    switch (msg) {
+        .clipboard_read, .clipboard_write, .desktop_notification => {
+            discardSurfaceMessage(msg);
+            return true;
+        },
+        else => return false,
+    }
+}
+
+test "peer raw mirrors suppress clipboard and duplicate notifications only after bootstrap" {
+    try std.testing.expect(!suppressPeerSurfaceEffect(false, .{ .clipboard_read = .standard }));
+    try std.testing.expect(suppressPeerSurfaceEffect(true, .{ .clipboard_read = .standard }));
+    try std.testing.expect(suppressPeerSurfaceEffect(true, .{ .clipboard_write = .{
+        .clipboard_type = .standard,
+        .req = try apprt.surface.Message.WriteReq.init(std.testing.allocator, @as([]const u8, "remote clipboard")),
+    } }));
+    try std.testing.expect(suppressPeerSurfaceEffect(true, .{ .desktop_notification = .{
+        .title = @splat(0),
+        .body = @splat(0),
+    } }));
+    try std.testing.expect(!suppressPeerSurfaceEffect(true, .{ .renderer_health = .healthy }));
+}
+
 test "terminal response suppression drops every parser reply class" {
     const testing = std.testing;
 
@@ -152,6 +177,9 @@ pub const StreamHandler = struct {
     /// render/input mirror and must not emit a second copy of protocol replies.
     suppress_terminal_responses: bool = false,
 
+    /// Enabled only after a desktop peer bootstrap, not for other manual mirrors.
+    suppress_peer_side_effects: bool = false,
+
     //---------------------------------------------------------------
     // Internal state
 
@@ -222,6 +250,11 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         msg: apprt.surface.Message,
     ) void {
+        // A desktop mirror receives the Host's raw stream, but clipboard
+        // requests and desktop notifications belong to that original terminal.
+        // In particular a query must never read the Guest clipboard and turn
+        // its response into remote keyboard input.
+        if (suppressPeerSurfaceEffect(self.suppress_peer_side_effects, msg)) return;
         // See messageWriter which has similar logic and explains why
         // we may have to do this.
         if (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {

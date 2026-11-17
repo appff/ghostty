@@ -88,6 +88,12 @@ pty_tee_userdata: ?*anyopaque = null,
 /// value remains a stable modulo-u64 stream position across long sessions.
 processed_output_bytes: u64 = 0,
 
+/// Remains true across mailbox waits which temporarily release the renderer lock.
+processing_output: bool = false,
+
+/// Allocated only for desktop peer attachments. Protected by renderer_state.mutex.
+peer_output_replay: ?@import("OutputReplay.zig") = null,
+
 /// The stream parser. This parses the stream of escape codes and so on
 /// from the child process and calls callbacks in the stream handler.
 terminal_stream: StreamHandler.Stream,
@@ -381,6 +387,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
 }
 
 pub fn deinit(self: *Termio) void {
+    if (self.peer_output_replay) |*replay| replay.deinit(self.alloc);
     self.backend.deinit();
     self.terminal.deinit(self.alloc);
     self.config.deinit();
@@ -902,6 +909,8 @@ pub fn cancelKittyReplayRestoreLocked(self: *Termio) void {
 /// section. Keeping the sequence update after the parser is the recovery
 /// contract: observers never see bytes as processed before terminal state does.
 fn processOutputAndAdvanceLocked(context: anytype, buf: []const u8) void {
+    context.processing_output = true;
+    defer context.processing_output = false;
     context.processOutputLocked(buf);
     context.processed_output_bytes +%= @intCast(buf.len);
 }
@@ -952,6 +961,10 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
         self.terminal_stream.nextSlice(buf);
     }
 
+    // Capture the exact processed bytes in the same critical section as the
+    // terminal state and output cursor, never a demand-gated Swift sequence.
+    if (self.peer_output_replay) |*replay| replay.append(buf);
+
     // If our stream handling caused messages to be sent to the mailbox
     // thread, then we need to wake it up so that it processes them.
     if (self.terminal_stream.handler.termio_messaged) {
@@ -963,10 +976,12 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
 test "processed output sequence advances after output is applied" {
     const FakeTermio = struct {
         processed_output_bytes: u64,
+        processing_output: bool = false,
         sequence_during_apply: u64 = 0,
         applied_bytes: usize = 0,
 
         fn processOutputLocked(self: *@This(), buf: []const u8) void {
+            std.debug.assert(self.processing_output);
             self.sequence_during_apply = self.processed_output_bytes;
             self.applied_bytes = buf.len;
         }
@@ -983,6 +998,7 @@ test "processed output sequence advances after output is applied" {
     );
     try std.testing.expectEqual(@as(usize, 3), fake.applied_bytes);
     try std.testing.expectEqual(@as(u64, 1), fake.processed_output_bytes);
+    try std.testing.expect(!fake.processing_output);
 }
 
 /// Sends a DSR response for the current color scheme to the pty.
