@@ -3074,6 +3074,14 @@ pub const CAPI = struct {
 
     /// Only a shell-less manual mirror can accept authoritative peer state.
     /// The embedder fences earlier output and serializes this with later bytes.
+    // Called on the app thread, like set_size/font actions. Only shell-less
+    // mirrors may pin their grid; it never resizes a Host-owned PTY.
+    export fn ghostty_surface_peer_set_grid(surface: *Surface, columns: u16, rows: u16) bool {
+        if (surface.io_mode != .manual_mirror or columns < 2 or columns > 1000 or rows < 2 or rows > 1000) return false;
+        surface.core_surface.setPeerDisplayGrid(.{ .columns = columns, .rows = rows }) catch return false;
+        return true;
+    }
+
     export fn ghostty_surface_peer_restore(surface: *Surface, bytes: [*]const u8, length: usize) bool {
         if (surface.io_mode != .manual_mirror) return false;
         var parsed = PeerTerminalSnapshot.decode(global.alloc(), bytes[0..length]) catch return false;

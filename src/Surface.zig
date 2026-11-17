@@ -138,6 +138,9 @@ inspector: ?*inspectorpkg.Inspector = null,
 /// All our sizing information.
 size: rendererpkg.Size,
 
+/// Desktop peer mirrors keep the Host grid while local fonts/views change.
+peer_display_grid: ?rendererpkg.GridSize = null,
+
 /// The configuration derived from the main config. We "derive" it so that
 /// we don't have a shared pointer hanging around that we need to worry about
 /// the lifetime of. This makes updating config at runtime easier.
@@ -4114,6 +4117,8 @@ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
     self.size.cell = size;
     self.balancePaddingIfNeeded();
 
+    self.applyPeerDisplayGrid();
+
     // Notify the terminal
     self.queueIo(.{ .resize = self.size }, .unlocked);
 
@@ -4273,10 +4278,33 @@ pub fn setRenderInsets(self: *Surface, top_px: u32, bottom_px: u32) !void {
     });
 }
 
+/// Sets a manual peer mirror's logical grid independently of its display size.
+pub fn setPeerDisplayGrid(self: *Surface, grid: rendererpkg.GridSize) !void {
+    if (self.peer_display_grid) |old| {
+        if (old.columns == grid.columns and old.rows == grid.rows) return;
+    }
+    self.peer_display_grid = grid;
+    try self.resize(self.size.screen);
+}
+
+fn applyPeerDisplayGrid(self: *Surface) void {
+    const grid = self.peer_display_grid orelse return;
+    self.size.screen = peerDisplaySize(self.size, grid);
+}
+
+fn peerDisplaySize(size: rendererpkg.Size, grid: rendererpkg.GridSize) rendererpkg.ScreenSize {
+    return .{
+        .width = @as(u32, grid.columns) * size.cell.width + size.padding.left + size.padding.right,
+        .height = @as(u32, grid.rows) * size.cell.height + size.padding.top + size.padding.bottom +
+            size.top_inset + size.bottom_inset,
+    };
+}
+
 fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     // Save our screen size
     self.size.screen = size;
     self.balancePaddingIfNeeded();
+    self.applyPeerDisplayGrid();
 
     // Recalculate our grid size. Because Ghostty supports fluid resizing,
     // its possible the grid doesn't change at all even if the screen size changes.
@@ -10034,5 +10062,21 @@ test "Surface: oversized soft-wrapped URL candidate is rejected" {
             pin,
             null,
         )) == null);
+    }
+}
+
+test "peer display grid stays fixed through font and view pixel changes" {
+    const testing = std.testing;
+    var size: rendererpkg.Size = .{
+        .screen = .{ .width = 600, .height = 400 },
+        .cell = .{ .width = 8, .height = 16 },
+        .padding = .{ .left = 3, .right = 5, .top = 7, .bottom = 9 },
+    };
+    const grid: rendererpkg.GridSize = .{ .columns = 120, .rows = 40 };
+    for ([_]u16{ 8, 16, 32, 8 }) |width| {
+        size.cell = .{ .width = width, .height = width * 2 };
+        size.screen = .{ .width = 320, .height = 200 };
+        size.screen = peerDisplaySize(size, grid);
+        try testing.expectEqual(grid, size.grid());
     }
 }

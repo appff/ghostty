@@ -1380,6 +1380,7 @@ GHOSTTY_API void ghostty_surface_peer_output_release(ghostty_surface_t);
 GHOSTTY_API void ghostty_peer_history_free(void*);
 GHOSTTY_API bool ghostty_peer_history_read(void*, uintptr_t, ghostty_string_s*, uint16_t*);
 // Manual-mirror-only mutations; serialize them with manual output/teardown.
+GHOSTTY_API bool ghostty_surface_peer_set_grid(ghostty_surface_t, uint16_t, uint16_t);
 GHOSTTY_API bool ghostty_surface_peer_restore(ghostty_surface_t, const uint8_t*, uintptr_t);
 GHOSTTY_API uint64_t ghostty_surface_peer_history_revision(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_peer_history_prepend(ghostty_surface_t, const uint8_t*, uintptr_t, uint16_t, uint16_t, uint64_t*);
