@@ -4284,6 +4284,11 @@ pub fn setPeerDisplayGrid(self: *Surface, grid: rendererpkg.GridSize) !void {
         if (old.columns == grid.columns and old.rows == grid.rows) return;
     }
     self.peer_display_grid = grid;
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        self.io.peer_display_only = true;
+    }
     try self.resize(self.size.screen);
 }
 

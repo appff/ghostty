@@ -94,6 +94,10 @@ processing_output: bool = false,
 /// Allocated only for desktop peer attachments. Protected by renderer_state.mutex.
 peer_output_replay: ?@import("OutputReplay.zig") = null,
 
+/// A manual desktop mirror owns only display pixels, not terminal modes.
+/// Protected by renderer_state.mutex, including installation by the app thread.
+peer_display_only: bool = false,
+
 /// The stream parser. This parses the stream of escape codes and so on
 /// from the child process and calls callbacks in the stream handler.
 terminal_stream: StreamHandler.Stream,
@@ -656,8 +660,12 @@ pub fn resize(
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
 
-        // Update the size of our terminal state
-        try self.terminal.resize(
+        // A Guest font/pixel change must not reset synchronized output or
+        // mutate Host-owned terminal state when the logical grid is unchanged.
+        const display_only = self.peer_display_only and
+            self.terminal.cols == grid_size.columns and
+            self.terminal.rows == grid_size.rows;
+        if (!display_only) try self.terminal.resize(
             self.alloc,
             .{
                 .cols = grid_size.columns,
@@ -670,7 +678,7 @@ pub fn resize(
         );
 
         // If we have size reporting enabled we need to send a report.
-        if (self.terminal.modes.get(.in_band_size_reports)) {
+        if (!self.peer_display_only and self.terminal.modes.get(.in_band_size_reports)) {
             try self.sizeReportLocked(td, .mode_2048);
         }
     }
